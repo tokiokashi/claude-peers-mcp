@@ -698,12 +698,15 @@ async function pollAndPushMessages() {
       log(`Pushed DM from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
 
-    // Poll room messages
+    // Poll room messages (with random delay to avoid response batching)
     const roomResult = await brokerFetch<PollMessagesResponse>("/poll-room-messages", {
       peer_id: myId,
     });
 
     for (const msg of roomResult.messages) {
+      const delay = Math.floor(Math.random() * 2000) + 500; // 0.5-2.5s random delay
+      await new Promise((r) => setTimeout(r, delay));
+
       const { summary: fromSummary, cwd: fromCwd } = await lookupSender(msg.from_id);
 
       await mcp.notification({
