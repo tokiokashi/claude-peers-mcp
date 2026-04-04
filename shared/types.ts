@@ -19,6 +19,50 @@ export interface Message {
   text: string;
   sent_at: string; // ISO timestamp
   delivered: boolean;
+  room_id?: string | null;
+}
+
+// --- Room types ---
+
+export interface Room {
+  room_id: string;
+  name: string;
+  created_at: string; // ISO timestamp
+}
+
+export interface RoomMember {
+  room_id: string;
+  peer_id: PeerId;
+  joined_at: string; // ISO timestamp
+}
+
+export interface CreateRoomRequest {
+  name: string;
+}
+
+export interface CreateRoomResponse {
+  room_id: string;
+  name: string;
+}
+
+export interface JoinRoomRequest {
+  room_id: string;
+  peer_id: PeerId;
+}
+
+export interface LeaveRoomRequest {
+  room_id: string;
+  peer_id: PeerId;
+}
+
+export interface PostRoomRequest {
+  room_id: string;
+  from_id: PeerId;
+  message: string;
+}
+
+export interface ListRoomsResponse {
+  rooms: Room[];
 }
 
 // --- Broker API types ---

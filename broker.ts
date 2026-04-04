@@ -21,6 +21,13 @@ import type {
   PollMessagesResponse,
   Peer,
   Message,
+  CreateRoomRequest,
+  CreateRoomResponse,
+  JoinRoomRequest,
+  LeaveRoomRequest,
+  PostRoomRequest,
+  ListRoomsResponse,
+  Room,
 } from "./shared/types.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
@@ -49,14 +56,50 @@ db.run(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_id TEXT NOT NULL,
-    to_id TEXT NOT NULL,
+    to_id TEXT,
     text TEXT NOT NULL,
     sent_at TEXT NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (from_id) REFERENCES peers(id),
-    FOREIGN KEY (to_id) REFERENCES peers(id)
+    room_id TEXT,
+    FOREIGN KEY (from_id) REFERENCES peers(id)
   )
 `);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS rooms (
+    room_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS room_members (
+    room_id TEXT NOT NULL,
+    peer_id TEXT NOT NULL,
+    joined_at TEXT NOT NULL,
+    PRIMARY KEY (room_id, peer_id),
+    FOREIGN KEY (room_id) REFERENCES rooms(room_id),
+    FOREIGN KEY (peer_id) REFERENCES peers(id)
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS room_deliveries (
+    message_id INTEGER NOT NULL,
+    peer_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, peer_id),
+    FOREIGN KEY (message_id) REFERENCES messages(id),
+    FOREIGN KEY (peer_id) REFERENCES peers(id)
+  )
+`);
+
+// Migration: add room_id column to messages if missing (existing DBs)
+try {
+  db.run("ALTER TABLE messages ADD COLUMN room_id TEXT");
+} catch {
+  // Column already exists, ignore
+}
 
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
@@ -120,6 +163,57 @@ const selectUndelivered = db.prepare(`
 
 const markDelivered = db.prepare(`
   UPDATE messages SET delivered = 1 WHERE id = ?
+`);
+
+// Room prepared statements
+
+const insertRoom = db.prepare(`
+  INSERT INTO rooms (room_id, name, created_at) VALUES (?, ?, ?)
+`);
+
+const insertRoomMember = db.prepare(`
+  INSERT OR IGNORE INTO room_members (room_id, peer_id, joined_at) VALUES (?, ?, ?)
+`);
+
+const deleteRoomMember = db.prepare(`
+  DELETE FROM room_members WHERE room_id = ? AND peer_id = ?
+`);
+
+const selectRoomsByPeer = db.prepare(`
+  SELECT r.room_id, r.name, r.created_at
+  FROM rooms r
+  JOIN room_members rm ON r.room_id = rm.room_id
+  WHERE rm.peer_id = ?
+`);
+
+const selectRoomMembers = db.prepare(`
+  SELECT peer_id FROM room_members WHERE room_id = ?
+`);
+
+const insertRoomMessage = db.prepare(`
+  INSERT INTO messages (from_id, to_id, text, sent_at, delivered, room_id)
+  VALUES (?, NULL, ?, ?, 0, ?)
+`);
+
+const selectUndeliveredRoomMessages = db.prepare(`
+  SELECT m.* FROM messages m
+  JOIN room_members rm ON m.room_id = rm.room_id
+  WHERE rm.peer_id = ?
+    AND m.from_id != ?
+    AND m.room_id IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM room_deliveries rd
+      WHERE rd.message_id = m.id AND rd.peer_id = rm.peer_id
+    )
+  ORDER BY m.sent_at ASC
+`);
+
+const insertRoomDelivery = db.prepare(`
+  INSERT OR IGNORE INTO room_deliveries (message_id, peer_id) VALUES (?, ?)
+`);
+
+const selectRoom = db.prepare(`
+  SELECT * FROM rooms WHERE room_id = ?
 `);
 
 // --- Generate peer ID ---
@@ -219,6 +313,52 @@ function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
   return { messages };
 }
 
+// --- Room handlers ---
+
+function handleCreateRoom(body: CreateRoomRequest): CreateRoomResponse {
+  const room_id = generateId();
+  const now = new Date().toISOString();
+  insertRoom.run(room_id, body.name, now);
+  return { room_id, name: body.name };
+}
+
+function handleJoinRoom(body: JoinRoomRequest): { ok: boolean; error?: string } {
+  const room = selectRoom.get(body.room_id) as Room | null;
+  if (!room) {
+    return { ok: false, error: `Room ${body.room_id} not found` };
+  }
+  insertRoomMember.run(body.room_id, body.peer_id, new Date().toISOString());
+  return { ok: true };
+}
+
+function handleLeaveRoom(body: LeaveRoomRequest): { ok: boolean } {
+  deleteRoomMember.run(body.room_id, body.peer_id);
+  return { ok: true };
+}
+
+function handlePostRoom(body: PostRoomRequest): { ok: boolean; error?: string } {
+  const room = selectRoom.get(body.room_id) as Room | null;
+  if (!room) {
+    return { ok: false, error: `Room ${body.room_id} not found` };
+  }
+  insertRoomMessage.run(body.from_id, body.message, new Date().toISOString(), body.room_id);
+  return { ok: true };
+}
+
+function handleListRooms(body: { peer_id: string }): ListRoomsResponse {
+  const rooms = selectRoomsByPeer.all(body.peer_id) as Room[];
+  return { rooms };
+}
+
+function handlePollRoomMessages(body: { peer_id: string }): PollMessagesResponse {
+  const messages = selectUndeliveredRoomMessages.all(body.peer_id, body.peer_id) as Message[];
+  // Per-member delivery tracking: record that this peer has received each message
+  for (const msg of messages) {
+    insertRoomDelivery.run(msg.id, body.peer_id);
+  }
+  return { messages };
+}
+
 function handleUnregister(body: { id: string }): void {
   deletePeer.run(body.id);
 }
@@ -260,6 +400,18 @@ Bun.serve({
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });
+        case "/create-room":
+          return Response.json(handleCreateRoom(body as CreateRoomRequest));
+        case "/join-room":
+          return Response.json(handleJoinRoom(body as JoinRoomRequest));
+        case "/leave-room":
+          return Response.json(handleLeaveRoom(body as LeaveRoomRequest));
+        case "/post-room":
+          return Response.json(handlePostRoom(body as PostRoomRequest));
+        case "/list-rooms":
+          return Response.json(handleListRooms(body as { peer_id: string }));
+        case "/poll-room-messages":
+          return Response.json(handlePollRoomMessages(body as { peer_id: string }));
         default:
           return Response.json({ error: "not found" }, { status: 404 });
       }

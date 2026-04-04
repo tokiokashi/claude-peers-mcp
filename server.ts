@@ -25,6 +25,9 @@ import type {
   RegisterResponse,
   PollMessagesResponse,
   Message,
+  CreateRoomResponse,
+  ListRoomsResponse,
+  Room,
 } from "./shared/types.ts";
 import {
   generateSummary,
@@ -159,6 +162,11 @@ Available tools:
 - send_message: Send a message to another instance by ID
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
 - check_messages: Manually check for new messages
+- create_room: Create a chat room for group conversation
+- join_room: Join an existing room by ID
+- leave_room: Leave a room
+- post_room: Post a message to a room
+- list_rooms: List rooms you have joined
 
 When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
   }
@@ -222,6 +230,79 @@ const TOOLS = [
     name: "check_messages",
     description:
       "Manually check for new messages from other Claude Code instances. Messages are normally pushed automatically via channel notifications, but you can use this as a fallback.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+  },
+  {
+    name: "create_room",
+    description:
+      "Create a chat room for group conversation between multiple Claude Code instances. Returns the room ID. The creator automatically joins the room.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string" as const,
+          description: "A short name for the room (e.g. 'design-review', 'standup')",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "join_room",
+    description:
+      "Join an existing chat room by its ID. You will start receiving messages posted to this room.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        room_id: {
+          type: "string" as const,
+          description: "The room ID to join",
+        },
+      },
+      required: ["room_id"],
+    },
+  },
+  {
+    name: "leave_room",
+    description:
+      "Leave a chat room. You will stop receiving messages from this room.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        room_id: {
+          type: "string" as const,
+          description: "The room ID to leave",
+        },
+      },
+      required: ["room_id"],
+    },
+  },
+  {
+    name: "post_room",
+    description:
+      "Post a message to a chat room. All members of the room (except you) will receive the message.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        room_id: {
+          type: "string" as const,
+          description: "The room ID to post to",
+        },
+        message: {
+          type: "string" as const,
+          description: "The message to post",
+        },
+      },
+      required: ["room_id", "message"],
+    },
+  },
+  {
+    name: "list_rooms",
+    description:
+      "List chat rooms you have joined.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -394,6 +475,178 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
     }
 
+    case "create_room": {
+      const { name: roomName } = args as { name: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<CreateRoomResponse>("/create-room", {
+          name: roomName,
+        });
+        // Auto-join the creator
+        await brokerFetch("/join-room", { room_id: result.room_id, peer_id: myId });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Room created and joined: "${result.name}" (ID: ${result.room_id})`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error creating room: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    case "join_room": {
+      const { room_id } = args as { room_id: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<{ ok: boolean; error?: string }>("/join-room", {
+          room_id,
+          peer_id: myId,
+        });
+        if (!result.ok) {
+          return {
+            content: [{ type: "text" as const, text: `Failed to join: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: `Joined room ${room_id}` }],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error joining room: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    case "leave_room": {
+      const { room_id } = args as { room_id: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        await brokerFetch("/leave-room", { room_id, peer_id: myId });
+        return {
+          content: [{ type: "text" as const, text: `Left room ${room_id}` }],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error leaving room: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    case "post_room": {
+      const { room_id, message } = args as { room_id: string; message: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<{ ok: boolean; error?: string }>("/post-room", {
+          room_id,
+          from_id: myId,
+          message,
+        });
+        if (!result.ok) {
+          return {
+            content: [{ type: "text" as const, text: `Failed to post: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: `Message posted to room ${room_id}` }],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error posting to room: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    case "list_rooms": {
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<ListRoomsResponse>("/list-rooms", {
+          peer_id: myId,
+        });
+        if (result.rooms.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "You have not joined any rooms." }],
+          };
+        }
+        const lines = result.rooms.map(
+          (r) => `  ${r.room_id}: "${r.name}" (created ${r.created_at})`
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Joined rooms (${result.rooms.length}):\n${lines.join("\n")}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error listing rooms: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -401,32 +654,34 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 // --- Polling loop for inbound messages ---
 
+// Cache of peer info to avoid redundant lookups within a single poll cycle
+async function lookupSender(senderId: string): Promise<{ summary: string; cwd: string }> {
+  try {
+    const peers = await brokerFetch<Peer[]>("/list-peers", {
+      scope: "machine",
+      cwd: myCwd,
+      git_root: myGitRoot,
+    });
+    const sender = peers.find((p) => p.id === senderId);
+    if (sender) {
+      return { summary: sender.summary, cwd: sender.cwd };
+    }
+  } catch {
+    // Non-critical
+  }
+  return { summary: "", cwd: "" };
+}
+
 async function pollAndPushMessages() {
   if (!myId) return;
 
   try {
-    const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
+    // Poll DMs
+    const dmResult = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
 
-    for (const msg of result.messages) {
-      // Look up the sender's info for context
-      let fromSummary = "";
-      let fromCwd = "";
-      try {
-        const peers = await brokerFetch<Peer[]>("/list-peers", {
-          scope: "machine",
-          cwd: myCwd,
-          git_root: myGitRoot,
-        });
-        const sender = peers.find((p) => p.id === msg.from_id);
-        if (sender) {
-          fromSummary = sender.summary;
-          fromCwd = sender.cwd;
-        }
-      } catch {
-        // Non-critical, proceed without sender info
-      }
+    for (const msg of dmResult.messages) {
+      const { summary: fromSummary, cwd: fromCwd } = await lookupSender(msg.from_id);
 
-      // Push as channel notification — this is what makes it immediate
       await mcp.notification({
         method: "notifications/claude/channel",
         params: {
@@ -440,7 +695,32 @@ async function pollAndPushMessages() {
         },
       });
 
-      log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
+      log(`Pushed DM from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
+    }
+
+    // Poll room messages
+    const roomResult = await brokerFetch<PollMessagesResponse>("/poll-room-messages", {
+      peer_id: myId,
+    });
+
+    for (const msg of roomResult.messages) {
+      const { summary: fromSummary, cwd: fromCwd } = await lookupSender(msg.from_id);
+
+      await mcp.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: msg.text,
+          meta: {
+            from_id: msg.from_id,
+            from_summary: fromSummary,
+            from_cwd: fromCwd,
+            room_id: msg.room_id,
+            sent_at: msg.sent_at,
+          },
+        },
+      });
+
+      log(`Pushed room msg from ${msg.from_id} in ${msg.room_id}: ${msg.text.slice(0, 80)}`);
     }
   } catch (e) {
     // Broker might be down temporarily, don't crash
