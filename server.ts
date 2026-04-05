@@ -145,6 +145,7 @@ function getTty(): string | null {
 let myId: PeerId | null = null;
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
+const myName: string | undefined = process.env.CLAUDE_PEERS_NAME || undefined;
 
 // --- MCP Server ---
 
@@ -353,6 +354,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           ];
           if (p.git_root) parts.push(`Repo: ${p.git_root}`);
           if (p.tty) parts.push(`TTY: ${p.tty}`);
+          if (p.name) parts.push(`Name: ${p.name}`);
           if (p.summary) parts.push(`Summary: ${p.summary}`);
           parts.push(`Last seen: ${p.last_seen}`);
           return parts.join("\n  ");
@@ -798,10 +800,11 @@ async function main() {
     cwd: myCwd,
     git_root: myGitRoot,
     tty,
+    name: myName,
     summary: initialSummary,
   });
   myId = reg.id;
-  log(`Registered as peer ${myId}`);
+  log(`Registered as peer ${myId}${myName ? ` (name: ${myName})` : ""}`);
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {

@@ -46,11 +46,19 @@ db.run(`
     cwd TEXT NOT NULL,
     git_root TEXT,
     tty TEXT,
+    name TEXT,
     summary TEXT NOT NULL DEFAULT '',
     registered_at TEXT NOT NULL,
     last_seen TEXT NOT NULL
   )
 `);
+
+// Migration: add name column if missing (existing DBs)
+try {
+  db.run("ALTER TABLE peers ADD COLUMN name TEXT");
+} catch {
+  // Column already exists, ignore
+}
 
 db.run(`
   CREATE TABLE IF NOT EXISTS messages (
@@ -126,8 +134,8 @@ setInterval(cleanStalePeers, 30_000);
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, pid, cwd, git_root, tty, summary, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, pid, cwd, git_root, tty, name, summary, registered_at, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateLastSeen = db.prepare(`
@@ -231,9 +239,23 @@ function generateId(): string {
 
 // --- Request handlers ---
 
-function handleRegister(body: RegisterRequest): RegisterResponse {
-  const id = generateId();
+function handleRegister(body: RegisterRequest & { name?: string }): RegisterResponse {
   const now = new Date().toISOString();
+
+  // Named peer (persistent session): reuse existing ID if same name is registered
+  if (body.name) {
+    const byName = db.query("SELECT id FROM peers WHERE name = ?").get(body.name) as { id: string } | null;
+    if (byName) {
+      // Reclaim: update the existing record with new PID/cwd/etc, keep the same ID
+      db.run(
+        "UPDATE peers SET pid = ?, cwd = ?, git_root = ?, tty = ?, summary = ?, last_seen = ? WHERE id = ?",
+        [body.pid, body.cwd, body.git_root, body.tty, body.summary, now, byName.id],
+      );
+      return { id: byName.id };
+    }
+  }
+
+  const id = generateId();
 
   // Remove any existing registration for this PID (re-registration)
   const existing = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as { id: string } | null;
@@ -245,7 +267,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     deletePeer.run(existing.id);
   }
 
-  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, body.summary, now, now);
+  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, body.name ?? null, body.summary, now, now);
   return { id };
 }
 

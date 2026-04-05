@@ -7,6 +7,7 @@ export interface Peer {
   cwd: string;
   git_root: string | null;
   tty: string | null;
+  name: string | null;
   summary: string;
   registered_at: string; // ISO timestamp
   last_seen: string; // ISO timestamp
@@ -72,6 +73,7 @@ export interface RegisterRequest {
   cwd: string;
   git_root: string | null;
   tty: string | null;
+  name?: string;
   summary: string;
 }
 
