@@ -676,56 +676,77 @@ async function lookupSender(senderId: string): Promise<{ summary: string; cwd: s
   return { summary: "", cwd: "" };
 }
 
+// Track successfully pushed message IDs to ack on next poll
+let pendingDmAcks: number[] = [];
+let pendingRoomAcks: number[] = [];
+
 async function pollAndPushMessages() {
   if (!myId) return;
 
   try {
-    // Poll DMs
-    const dmResult = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
+    // Poll DMs — piggyback ack of previous batch
+    const dmResult = await brokerFetch<PollMessagesResponse>("/poll-messages", {
+      id: myId,
+      ack_ids: pendingDmAcks,
+    });
+    pendingDmAcks = [];
 
     for (const msg of dmResult.messages) {
-      const { summary: fromSummary, cwd: fromCwd } = await lookupSender(msg.from_id);
+      try {
+        const { summary: fromSummary, cwd: fromCwd } = await lookupSender(msg.from_id);
 
-      await mcp.notification({
-        method: "notifications/claude/channel",
-        params: {
-          content: msg.text,
-          meta: {
-            from_id: msg.from_id,
-            from_summary: fromSummary,
-            from_cwd: fromCwd,
-            sent_at: msg.sent_at,
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: msg.text,
+            meta: {
+              from_id: msg.from_id,
+              from_summary: fromSummary,
+              from_cwd: fromCwd,
+              sent_at: msg.sent_at,
+            },
           },
-        },
-      });
+        });
 
-      log(`Pushed DM from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
+        pendingDmAcks.push(msg.id);
+        log(`Pushed DM from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
+      } catch (e) {
+        log(`Failed to push DM ${msg.id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
 
-    // Poll room messages (with random delay to avoid response batching)
+    // Poll room messages — piggyback ack of previous batch
     const roomResult = await brokerFetch<PollMessagesResponse>("/poll-room-messages", {
       peer_id: myId,
+      ack_ids: pendingRoomAcks,
     });
+    pendingRoomAcks = [];
 
     for (const msg of roomResult.messages) {
-      const delay = Math.floor(Math.random() * 2000) + 500; // 0.5-2.5s random delay
-      await new Promise((r) => setTimeout(r, delay));
+      try {
+        const delay = Math.floor(Math.random() * 2000) + 500; // 0.5-2.5s random delay
+        await new Promise((r) => setTimeout(r, delay));
 
-      // Room messages: speaker name is already in the message body ([name] ...),
-      // so skip from_summary and from_cwd to reduce context consumption
-      await mcp.notification({
-        method: "notifications/claude/channel",
-        params: {
-          content: msg.text,
-          meta: {
-            from_id: msg.from_id,
-            room_id: msg.room_id,
+        // Room messages: speaker name is already in the message body ([name] ...),
+        // so skip from_summary and from_cwd to reduce context consumption
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: msg.text,
+            meta: {
+              from_id: msg.from_id,
+              room_id: msg.room_id,
+            },
           },
-        },
-      });
+        });
 
-      log(`Pushed room msg from ${msg.from_id} in ${msg.room_id}: ${msg.text.slice(0, 80)}`);
+        pendingRoomAcks.push(msg.id);
+        log(`Pushed room msg from ${msg.from_id} in ${msg.room_id}: ${msg.text.slice(0, 80)}`);
+      } catch (e) {
+        log(`Failed to push room msg ${msg.id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
+
   } catch (e) {
     // Broker might be down temporarily, don't crash
     log(`Poll error: ${e instanceof Error ? e.message : String(e)}`);

@@ -308,12 +308,21 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
   return { ok: true };
 }
 
-function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
+function handlePollMessages(body: PollMessagesRequest & { ack_ids?: number[] }): PollMessagesResponse {
+  // Ack previous batch if client sent ack_ids (new protocol)
+  if (body.ack_ids) {
+    for (const id of body.ack_ids) {
+      markDelivered.run(id);
+    }
+  }
+
   const messages = selectUndelivered.all(body.id) as Message[];
 
-  // Mark them as delivered
-  for (const msg of messages) {
-    markDelivered.run(msg.id);
+  // Legacy clients (no ack_ids field): mark as delivered immediately (backward compat)
+  if (!body.ack_ids) {
+    for (const msg of messages) {
+      markDelivered.run(msg.id);
+    }
   }
 
   return { messages };
@@ -378,12 +387,23 @@ function handleListRooms(body: { peer_id: string }): ListRoomsResponse {
   return { rooms };
 }
 
-function handlePollRoomMessages(body: { peer_id: string }): PollMessagesResponse {
-  const messages = selectUndeliveredRoomMessages.all(body.peer_id, body.peer_id) as Message[];
-  // Per-member delivery tracking: record that this peer has received each message
-  for (const msg of messages) {
-    insertRoomDelivery.run(msg.id, body.peer_id);
+function handlePollRoomMessages(body: { peer_id: string; ack_ids?: number[] }): PollMessagesResponse {
+  // Ack previous batch if client sent ack_ids (new protocol)
+  if (body.ack_ids) {
+    for (const id of body.ack_ids) {
+      insertRoomDelivery.run(id, body.peer_id);
+    }
   }
+
+  const messages = selectUndeliveredRoomMessages.all(body.peer_id, body.peer_id) as Message[];
+
+  // Legacy clients (no ack_ids field): mark as delivered immediately (backward compat)
+  if (!body.ack_ids) {
+    for (const msg of messages) {
+      insertRoomDelivery.run(msg.id, body.peer_id);
+    }
+  }
+
   return { messages };
 }
 
@@ -439,7 +459,7 @@ Bun.serve({
         case "/list-rooms":
           return Response.json(handleListRooms(body as { peer_id: string }));
         case "/poll-room-messages":
-          return Response.json(handlePollRoomMessages(body as { peer_id: string }));
+          return Response.json(handlePollRoomMessages(body as { peer_id: string; ack_ids?: number[] }));
         default:
           return Response.json({ error: "not found" }, { status: 404 });
       }
