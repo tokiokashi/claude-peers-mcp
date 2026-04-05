@@ -110,6 +110,8 @@ function cleanStalePeers() {
       process.kill(peer.pid, 0);
     } catch {
       // Process doesn't exist, remove it
+      db.run("DELETE FROM room_deliveries WHERE peer_id = ?", [peer.id]);
+      db.run("DELETE FROM room_members WHERE peer_id = ?", [peer.id]);
       db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
       db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
     }
@@ -236,6 +238,10 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   // Remove any existing registration for this PID (re-registration)
   const existing = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as { id: string } | null;
   if (existing) {
+    // Transfer room memberships from old peer ID to new peer ID
+    db.run("UPDATE room_members SET peer_id = ? WHERE peer_id = ?", [id, existing.id]);
+    // Transfer delivery records so already-seen messages aren't re-delivered
+    db.run("UPDATE room_deliveries SET peer_id = ? WHERE peer_id = ?", [id, existing.id]);
     deletePeer.run(existing.id);
   }
 
@@ -328,6 +334,16 @@ function handleJoinRoom(body: JoinRoomRequest): { ok: boolean; error?: string } 
     return { ok: false, error: `Room ${body.room_id} not found` };
   }
   insertRoomMember.run(body.room_id, body.peer_id, new Date().toISOString());
+
+  // Mark all existing messages in this room as delivered for the joining peer
+  // so they don't get a flood of old messages
+  const existingMessages = db.query(
+    "SELECT id FROM messages WHERE room_id = ? AND from_id != ?",
+  ).all(body.room_id, body.peer_id) as { id: number }[];
+  for (const msg of existingMessages) {
+    insertRoomDelivery.run(msg.id, body.peer_id);
+  }
+
   return { ok: true };
 }
 
@@ -341,7 +357,19 @@ function handlePostRoom(body: PostRoomRequest): { ok: boolean; error?: string } 
   if (!room) {
     return { ok: false, error: `Room ${body.room_id} not found` };
   }
-  insertRoomMessage.run(body.from_id, body.message, new Date().toISOString(), body.room_id);
+
+  // Prefix message with speaker name extracted from peer summary
+  // e.g. summary "紅莉栖 — life でタスク管理中" → speaker "紅莉栖"
+  let text = body.message;
+  const peer = db.query("SELECT summary FROM peers WHERE id = ?").get(body.from_id) as { summary: string } | null;
+  if (peer?.summary) {
+    const speaker = peer.summary.split(/\s*[—–\-]\s*/)[0]?.trim();
+    if (speaker) {
+      text = `[${speaker}] ${body.message}`;
+    }
+  }
+
+  insertRoomMessage.run(body.from_id, text, new Date().toISOString(), body.room_id);
   return { ok: true };
 }
 

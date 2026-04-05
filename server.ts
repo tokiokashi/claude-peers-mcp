@@ -41,7 +41,11 @@ const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
-const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
+const BROKER_SCRIPT = (() => {
+  const p = new URL("./broker.ts", import.meta.url).pathname;
+  // Windows: pathname returns "/D:/..." — strip leading slash before drive letter
+  return p.match(/^\/[A-Za-z]:/) ? p.slice(1) : p;
+})();
 
 // --- Broker communication ---
 
@@ -707,18 +711,15 @@ async function pollAndPushMessages() {
       const delay = Math.floor(Math.random() * 2000) + 500; // 0.5-2.5s random delay
       await new Promise((r) => setTimeout(r, delay));
 
-      const { summary: fromSummary, cwd: fromCwd } = await lookupSender(msg.from_id);
-
+      // Room messages: speaker name is already in the message body ([name] ...),
+      // so skip from_summary and from_cwd to reduce context consumption
       await mcp.notification({
         method: "notifications/claude/channel",
         params: {
           content: msg.text,
           meta: {
             from_id: msg.from_id,
-            from_summary: fromSummary,
-            from_cwd: fromCwd,
             room_id: msg.room_id,
-            sent_at: msg.sent_at,
           },
         },
       });
